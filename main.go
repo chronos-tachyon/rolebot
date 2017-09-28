@@ -160,41 +160,6 @@ func OnMessage(session *discordgo.Session, message *discordgo.MessageCreate) {
 		}
 	}
 
-	chansByName := make(map[string]*discordgo.Channel, len(g.Channels))
-	chansCollide := make(map[string]struct{}, 0)
-	for _, x := range g.Channels {
-		k := key(x.Name)
-		if _, exists := chansByName[k]; exists {
-			chansCollide[k] = struct{}{}
-		} else {
-			chansByName[k] = x
-		}
-	}
-
-	rolesById := make(map[string]*discordgo.Role, len(g.Roles))
-	rolesByName := make(map[string]*discordgo.Role, len(g.Roles))
-	rolesCollide := make(map[string]struct{}, 0)
-	for _, x := range g.Roles {
-		k := key(x.Name)
-		rolesById[x.ID] = x
-		if _, exists := rolesByName[k]; exists {
-			rolesCollide[k] = struct{}{}
-		} else {
-			rolesByName[k] = x
-		}
-	}
-
-	membersByNick := make(map[string]*discordgo.Member, len(g.Members))
-	membersCollide := make(map[string]struct{}, 0)
-	for _, x := range g.Members {
-		k := key(x.Nick)
-		if _, exists := membersByNick[k]; exists {
-			membersCollide[k] = struct{}{}
-		} else {
-			membersByNick[k] = x
-		}
-	}
-
 	var buf bytes.Buffer
 	var rr *discordgo.Role
 	var mm *discordgo.Member
