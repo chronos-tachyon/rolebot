@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
 	"io/ioutil"
@@ -17,6 +16,8 @@ import (
 	"syscall"
 
 	"github.com/bwmarrin/discordgo"
+
+	"github.com/chronos-tachyon/rolebot/bothelper"
 )
 
 const (
@@ -27,14 +28,8 @@ var (
 	flagTokenFile = flag.String("tokenfile", "", "Path to text file containing bot token")
 	flagStateFile = flag.String("statefile", "", "Path to state file (should be writable)")
 
-	reSpace      = regexp.MustCompile(`\s+`)
-	reChannelRef = regexp.MustCompile(`^<#([0-9]+)>$`)
-	reRoleRef    = regexp.MustCompile(`^<@&([0-9]+)>$`)
-	reMemberRef  = regexp.MustCompile(`^<@([0-9]+)>$`)
-	reBrackets   = regexp.MustCompile(`^\[(.*)\]$`)
-
-	errNotFound  = errors.New("not found")
-	errManyFound = errors.New("many found")
+	reSpace    = regexp.MustCompile(`\s+`)
+	reBrackets = regexp.MustCompile(`^\[(.*)\]$`)
 )
 
 type State struct {
@@ -49,9 +44,9 @@ type GuildState struct {
 }
 
 var (
-	session *discordgo.Session
-	mutex   sync.Mutex
-	state   State
+	helper *bothelper.BotHelper
+	mutex  sync.Mutex
+	state  State
 )
 
 func main() {
@@ -78,7 +73,7 @@ func main() {
 		log.Fatalf("fatal: json.Unmarshal: %v", err)
 	}
 
-	session, err = discordgo.New(token)
+	session, err := discordgo.New(token)
 	if err != nil {
 		log.Fatalf("fatal: discordgo.New: %v", err)
 	}
@@ -86,6 +81,8 @@ func main() {
 	session.StateEnabled = true
 	session.SyncEvents = false
 	session.AddHandler(OnMessage)
+
+	helper = bothelper.New(session)
 
 	err = session.Open()
 	if err != nil {
@@ -126,7 +123,7 @@ func OnMessage(session *discordgo.Session, message *discordgo.MessageCreate) {
 		return
 	}
 
-	g, err := guildById(c.GuildID)
+	g, err := helper.GuildById(c.GuildID)
 	if err != nil {
 		log.Printf("error: Guild: %v", err)
 		return
@@ -312,14 +309,14 @@ func parseChan(buf *bytes.Buffer, tcid, gid, arg string) (cid string, msg string
 		msg = "only on this channel"
 		valid = true
 	} else {
-		c, err := chanByArgument(gid, arg)
+		c, err := helper.ChannelByArgument(gid, arg)
 		if err == nil {
 			cid = c.ID
 			msg = fmt.Sprintf("only on #%s", c.Name)
 			valid = true
-		} else if err == errManyFound {
+		} else if err == bothelper.ErrManyFound {
 			fmt.Fprintf(buf, "Sorry, but I see multiple channels named #%s", c.Name)
-		} else if err == errNotFound {
+		} else if err == bothelper.ErrNotFound {
 			buf.WriteString("Sorry, but I don't see a channel with that name")
 		} else {
 			buf.WriteString("Error while searching for channel!")
@@ -331,12 +328,12 @@ func parseChan(buf *bytes.Buffer, tcid, gid, arg string) (cid string, msg string
 
 func parseRole(buf *bytes.Buffer, gid, arg string) (r *discordgo.Role, valid bool) {
 	var err error
-	r, err = roleByArgument(gid, arg)
+	r, err = helper.RoleByArgument(gid, arg)
 	if err == nil {
 		valid = true
-	} else if err == errManyFound {
+	} else if err == bothelper.ErrManyFound {
 		fmt.Fprintf(buf, "Sorry, but I see multiple roles named %q", r.Name)
-	} else if err == errNotFound {
+	} else if err == bothelper.ErrNotFound {
 		buf.WriteString("Sorry, but I don't see a role with that name")
 	} else {
 		buf.WriteString("Error while searching for role!")
@@ -347,239 +344,18 @@ func parseRole(buf *bytes.Buffer, gid, arg string) (r *discordgo.Role, valid boo
 
 func parseMember(buf *bytes.Buffer, gid, arg string) (m *discordgo.Member, valid bool) {
 	var err error
-	m, err = memberByArgument(gid, arg)
+	m, err = helper.MemberByArgument(gid, arg)
 	if err == nil {
 		valid = true
-	} else if err == errManyFound {
+	} else if err == bothelper.ErrManyFound {
 		fmt.Fprintf(buf, "Sorry, but I see multiple members with the nickname %q", m.Nick)
-	} else if err == errNotFound {
+	} else if err == bothelper.ErrNotFound {
 		buf.WriteString("Sorry, but I don't see a member with that nickname")
 	} else {
 		buf.WriteString("Error while searching for member!")
 		log.Printf("error: %v", err)
 	}
 	return
-}
-
-func guildById(id string) (*discordgo.Guild, error) {
-	g, err := session.State.Guild(id)
-	if err == nil {
-		return g, nil
-	}
-
-	g, err = session.Guild(id)
-	if err != nil {
-		return nil, fmt.Errorf("Guild: %v", err)
-	}
-
-	// TODO: no such guild -> errNotFound
-	return g, nil
-}
-
-func chanById(id string) (*discordgo.Channel, error) {
-	c, err := session.State.Channel(id)
-	if err == nil {
-		return c, nil
-	}
-
-	c, err = session.Channel(id)
-	if err != nil {
-		return nil, fmt.Errorf("Channel: %v", err)
-	}
-
-	// TODO: no such channel -> errNotFound
-	return c, nil
-}
-
-func chanByName(gid, name string) (*discordgo.Channel, error) {
-	k1 := key(name)
-
-	var result *discordgo.Channel
-	var found uint = 0
-
-	session.State.RLock()
-	for _, g := range session.State.Guilds {
-		if g.ID != gid {
-			continue
-		}
-		for _, c := range g.Channels {
-			k2 := key(c.Name)
-			if k1 == k2 {
-				result = c
-				found += 1
-			}
-		}
-	}
-	session.State.RUnlock()
-
-	if found == 0 {
-		channels, err := session.GuildChannels(gid)
-		if err != nil {
-			return nil, fmt.Errorf("GuildChannels: %v", err)
-		}
-
-		for _, c := range channels {
-			k2 := key(c.Name)
-			if k1 == k2 {
-				result = c
-				found += 1
-			}
-		}
-	}
-
-	if found == 1 {
-		return result, nil
-	}
-	if found != 0 {
-		return result, errManyFound
-	}
-	return nil, errNotFound
-}
-
-func chanByArgument(gid, arg string) (*discordgo.Channel, error) {
-	match := reChannelRef.FindStringSubmatch(arg)
-	if len(match) == 2 {
-		return chanById(match[1])
-	}
-	return chanByName(gid, arg)
-}
-
-func roleById(gid, rid string) (*discordgo.Role, error) {
-	r, err := session.State.Role(gid, rid)
-	if err == nil {
-		return r, nil
-	}
-
-	roles, err := session.GuildRoles(gid)
-	if err != nil {
-		return nil, fmt.Errorf("GuildRoles: %v", err)
-	}
-
-	for _, r = range roles {
-		if r.ID == rid {
-			return r, nil
-		}
-	}
-	return nil, errNotFound
-}
-
-func roleByName(gid, name string) (*discordgo.Role, error) {
-	k1 := key(name)
-
-	var result *discordgo.Role
-	var found uint = 0
-
-	session.State.RLock()
-	for _, g := range session.State.Guilds {
-		if g.ID != gid {
-			continue
-		}
-		for _, r := range g.Roles {
-			k2 := key(r.Name)
-			if k1 == k2 {
-				result = r
-				found += 1
-			}
-		}
-	}
-	session.State.RUnlock()
-
-	if found == 0 {
-		roles, err := session.GuildRoles(gid)
-		if err != nil {
-			return nil, fmt.Errorf("GuildRoles: %v", err)
-		}
-
-		for _, r := range roles {
-			k2 := key(r.Name)
-			if k1 == k2 {
-				result = r
-				found += 1
-			}
-		}
-	}
-
-	if found == 1 {
-		return result, nil
-	}
-	if found != 0 {
-		return result, errManyFound
-	}
-	return nil, errNotFound
-}
-
-func roleByArgument(gid, arg string) (*discordgo.Role, error) {
-	match := reRoleRef.FindStringSubmatch(arg)
-	if len(match) == 2 {
-		return roleById(gid, match[1])
-	}
-	return roleByName(gid, arg)
-}
-
-func memberById(gid, uid string) (*discordgo.Member, error) {
-	m, err := session.State.Member(gid, uid)
-	if err == nil {
-		return m, nil
-	}
-
-	m, err = session.GuildMember(gid, uid)
-	if err != nil {
-		return nil, fmt.Errorf("GuildMember: %v", err)
-	}
-
-	// TODO: no such member -> errNotFound
-	return m, nil
-}
-
-func memberByName(gid, name string) (*discordgo.Member, error) {
-	k1 := key(name)
-
-	var result *discordgo.Member
-	var found uint = 0
-
-	session.State.RLock()
-	for _, g := range session.State.Guilds {
-		if g.ID != gid {
-			continue
-		}
-		for _, m := range g.Members {
-			if isMatchingNick(k1, m) {
-				result = m
-				found += 1
-			}
-		}
-	}
-	session.State.RUnlock()
-
-	if found == 0 {
-		// TODO: figure out the API for paginated results
-		members, err := session.GuildMembers(gid, "", maxMembersPerFetch)
-		if err != nil {
-			return nil, fmt.Errorf("GuildMembers: %v", err)
-		}
-		for _, m := range members {
-			if isMatchingNick(k1, m) {
-				result = m
-				found += 1
-			}
-		}
-	}
-
-	if found == 1 {
-		return result, nil
-	}
-	if found != 0 {
-		return result, errManyFound
-	}
-	return nil, errNotFound
-}
-
-func memberByArgument(gid, arg string) (*discordgo.Member, error) {
-	match := reMemberRef.FindStringSubmatch(arg)
-	if len(match) == 2 {
-		return memberById(gid, match[1])
-	}
-	return memberByName(gid, arg)
 }
 
 func saveState() {
@@ -616,7 +392,7 @@ func isTrusted(guild *GuildState, g *discordgo.Guild, u *discordgo.User) bool {
 		return true
 	}
 	if len(guild.TrustedRoles) != 0 {
-		member, err := session.GuildMember(g.ID, u.ID)
+		member, err := helper.GuildMember(g.ID, u.ID)
 		if err != nil {
 			log.Printf("error: GuildMember: %v", err)
 			return false
@@ -628,26 +404,6 @@ func isTrusted(guild *GuildState, g *discordgo.Guild, u *discordgo.User) bool {
 		}
 	}
 	return false
-}
-
-func isMatchingNick(k1 string, m *discordgo.Member) bool {
-	var k2, k3 string
-	if m.Nick == "" {
-		k2 = key(m.User.Username)
-	} else {
-		k2 = key(m.Nick)
-	}
-	k3 = key(fmt.Sprintf("%s#%s", m.User.Username, m.User.Discriminator))
-	return (k1 == k2 || k1 == k3)
-}
-
-func key(s string) string {
-	b := []byte(s)
-	b = bytes.ToLower(b)
-	b = bytes.TrimLeft(b, "#@")
-	b = bytes.TrimSpace(b)
-	b = append(b, '/', 'K')
-	return string(b)
 }
 
 func jsonMarshal(v interface{}) ([]byte, error) {
