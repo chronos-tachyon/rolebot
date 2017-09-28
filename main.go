@@ -31,6 +31,7 @@ var (
 	reChannelRef = regexp.MustCompile(`^<#([0-9]+)>$`)
 	reRoleRef    = regexp.MustCompile(`^<@&([0-9]+)>$`)
 	reMemberRef  = regexp.MustCompile(`^<@([0-9]+)>$`)
+	reBrackets   = regexp.MustCompile(`^\[(.*)\]$`)
 
 	errNotFound  = errors.New("not found")
 	errManyFound = errors.New("many found")
@@ -116,7 +117,7 @@ func OnMessage(session *discordgo.Session, message *discordgo.MessageCreate) {
 	var command, argument string
 	command = args[0]
 	if len(args) > 1 {
-		argument = args[1]
+		argument = reBrackets.ReplaceAllString(args[1], "$1")
 	}
 
 	c, err := session.Channel(message.ChannelID)
