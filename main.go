@@ -97,12 +97,9 @@ func main() {
 }
 
 func OnMessage(session *discordgo.Session, message *discordgo.MessageCreate) {
-	session.State.RLock()
-	selfUserId := session.State.User.ID
-	session.State.RUnlock()
-
+	self := helper.Me()
 	u := message.Author
-	if u.ID == selfUserId {
+	if u.ID == self.ID {
 		return
 	}
 
@@ -168,7 +165,13 @@ func OnMessage(session *discordgo.Session, message *discordgo.MessageCreate) {
 
 	switch command {
 	case ".help":
-		buf.WriteString(msgHelp)
+		buf.WriteString("```")
+		buf.WriteString(msgBasicHelp)
+		if argument == "advanced" {
+			buf.WriteString("\n")
+			buf.WriteString(msgAdvancedHelp)
+		}
+		buf.WriteString("```")
 
 	case ".roles":
 		roles := make([]*discordgo.Role, len(g.Roles))
@@ -284,10 +287,6 @@ func OnMessage(session *discordgo.Session, message *discordgo.MessageCreate) {
 		} else if valid {
 			buf.WriteString("Sorry, but only trusted users can do that")
 		}
-
-	case ".debug":
-		log.Printf("debug: %q", message.Content)
-		buf.WriteString("OK, I logged that")
 
 	default:
 		return
@@ -417,25 +416,28 @@ func jsonMarshal(v interface{}) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-const msgHelp = "```" + `Standard commands:
+const msgBasicHelp = `Basic commands:
 
-.help           Show this message
+.help           Show help for basic commands
+.help advanced  Show help for all commands
+
 .roles          List available roles
 
 .iam [role]     Add yourself to a role
 .iamnot [role]  Remove yourself from a role
+`
 
-Trusted commands:
+const msgAdvancedHelp = `Advanced commands (for trusted users):
 
 .chan any         Listen for commands on any channel
 .chan this        Listen for commands on this channel only
 .chan [chan]      Listen for commands on #[chan] only
 
-.trust [user]     Mark user as a trusted user
-.notrust [user]   Mark user as a non-trusted user
-.rtrust [role]    Mark role as a trusted role
-.nortrust [role]  Mark role as a non-trusted role
+.trust [user]     Mark [user] as a trusted user
+.notrust [user]   Mark [user] as a non-trusted user
+.rtrust [role]    Mark [role] as a trusted role
+.nortrust [role]  Mark [role] as a non-trusted role
 
-.auto [role]      Mark role as self-grantable
-.noauto [role]    Mark role as non-self-grantable
-` + "```"
+.auto [role]      Mark [role] as self-grantable
+.noauto [role]    Mark [role] as non-self-grantable
+`
