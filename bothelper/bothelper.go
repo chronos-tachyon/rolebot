@@ -21,7 +21,7 @@ var (
 var (
 	reChannelRef = regexp.MustCompile(`^<#([0-9]+)>$`)
 	reRoleRef    = regexp.MustCompile(`^<@&([0-9]+)>$`)
-	reMemberRef  = regexp.MustCompile(`^<@([0-9]+)>$`)
+	reMemberRef  = regexp.MustCompile(`^<@!?([0-9]+)>$`)
 )
 
 func Fold(s string) string {

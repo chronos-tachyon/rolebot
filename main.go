@@ -28,8 +28,9 @@ var (
 	flagTokenFile = flag.String("tokenfile", "", "Path to text file containing bot token")
 	flagStateFile = flag.String("statefile", "", "Path to state file (should be writable)")
 
-	reSpace    = regexp.MustCompile(`\s+`)
-	reBrackets = regexp.MustCompile(`^\[(.*)\]$`)
+	reSpace     = regexp.MustCompile(`\s+`)
+	reBrackets  = regexp.MustCompile(`^\[(.*)\]$`)
+	reKarmaBump = regexp.MustCompile(`^\s*(<@!?[0-9]+>)\s*\+\+\s*$`)
 )
 
 type State struct {
@@ -41,6 +42,8 @@ type GuildState struct {
 	BotChannelId string              `json:"botChannelId,omitempty"`
 	TrustedRoles map[string]struct{} `json:"trustedRoles,omitempty"`
 	TrustedUsers map[string]struct{} `json:"trustedUsers,omitempty"`
+	KarmaEnabled bool                `json:"karmaEnabled,omitempty"`
+	Karma        map[string]int      `json:"karma,omitempty"`
 }
 
 var (
@@ -103,15 +106,19 @@ func OnMessage(session *discordgo.Session, message *discordgo.MessageCreate) {
 		return
 	}
 
-	if !strings.HasPrefix(message.Content, ".") {
-		return
-	}
-
-	args := reSpace.Split(message.Content, 2)
 	var command, argument string
-	command = args[0]
-	if len(args) > 1 {
-		argument = reBrackets.ReplaceAllString(args[1], "$1")
+	if reKarmaBump.MatchString(message.Content) {
+		match := reKarmaBump.FindStringSubmatch(message.Content)
+		command = ".karmabump"
+		argument = match[1]
+	} else if strings.HasPrefix(message.Content, ".") {
+		args := reSpace.Split(message.Content, 2)
+		command = args[0]
+		if len(args) > 1 {
+			argument = reBrackets.ReplaceAllString(args[1], "$1")
+		}
+	} else {
+		return
 	}
 
 	c, err := session.Channel(message.ChannelID)
@@ -149,7 +156,10 @@ func OnMessage(session *discordgo.Session, message *discordgo.MessageCreate) {
 	}
 
 	if guild.BotChannelId != "" && guild.BotChannelId != message.ChannelID {
-		bypass := (command == ".chan") && isTrusted(guild, g, u)
+		bypassDebug := (command == ".debug") && isTrusted(guild, g, u)
+		bypassChan := (command == ".chan") && isTrusted(guild, g, u)
+		bypassKarma := (command == ".karma" || command == ".karmabump")
+		bypass := bypassDebug || bypassChan || bypassKarma
 		if !bypass {
 			return
 		}
@@ -201,10 +211,12 @@ func OnMessage(session *discordgo.Session, message *discordgo.MessageCreate) {
 			}
 		} else if valid {
 			fmt.Fprintf(&buf, "Sorry, but I'm not allowed to grant the %q role", rr.Name)
+		} else {
+			return
 		}
 
 	case ".iamnot":
-		rr, valid = parseRole(&buf, g.ID, argument)
+		rr, valid := parseRole(&buf, g.ID, argument)
 		if valid && isAuto(guild, rr) {
 			err = session.GuildMemberRoleRemove(g.ID, u.ID, rr.ID)
 			if err != nil {
@@ -215,46 +227,56 @@ func OnMessage(session *discordgo.Session, message *discordgo.MessageCreate) {
 			}
 		} else if valid {
 			fmt.Fprintf(&buf, "Sorry, but I'm not allowed to remove the %q role", rr.Name)
+		} else {
+			return
 		}
 
 	case ".trust":
-		mm, valid = parseMember(&buf, g.ID, argument)
+		mm, valid := parseMember(&buf, g.ID, argument)
 		if valid && isTrusted(guild, g, u) {
 			guild.TrustedUsers[mm.User.ID] = struct{}{}
 			saveState()
 			fmt.Fprintf(&buf, "OK, I now trust %s", mm.User.Mention())
 		} else if valid {
 			buf.WriteString("Sorry, but only trusted users can do that")
+		} else {
+			return
 		}
 
 	case ".notrust":
-		mm, valid = parseMember(&buf, g.ID, argument)
+		mm, valid := parseMember(&buf, g.ID, argument)
 		if valid && isTrusted(guild, g, u) {
 			delete(guild.TrustedUsers, mm.User.ID)
 			saveState()
 			fmt.Fprintf(&buf, "OK, I no longer trust %s", mm.User.Mention())
 		} else if valid {
 			buf.WriteString("Sorry, but only trusted users can do that")
+		} else {
+			return
 		}
 
 	case ".rtrust":
-		rr, valid = parseRole(&buf, g.ID, argument)
+		rr, valid := parseRole(&buf, g.ID, argument)
 		if valid && isTrusted(guild, g, u) {
 			guild.TrustedRoles[rr.ID] = struct{}{}
 			saveState()
 			fmt.Fprintf(&buf, "OK, I now trust everyone with the %q role", rr.Name)
 		} else if valid {
 			buf.WriteString("Sorry, but only trusted users can do that")
+		} else {
+			return
 		}
 
 	case ".nortrust":
-		rr, valid = parseRole(&buf, g.ID, argument)
+		rr, valid := parseRole(&buf, g.ID, argument)
 		if valid && isTrusted(guild, g, u) {
 			delete(guild.TrustedRoles, rr.ID)
 			saveState()
 			fmt.Fprintf(&buf, "OK, I no longer trust everyone with the %q role", rr.Name)
 		} else if valid {
 			buf.WriteString("Sorry, but only trusted users can do that")
+		} else {
+			return
 		}
 
 	case ".auto":
@@ -265,6 +287,8 @@ func OnMessage(session *discordgo.Session, message *discordgo.MessageCreate) {
 			fmt.Fprintf(&buf, "OK, I am now permitted to grant the %q role", rr.Name)
 		} else if valid {
 			buf.WriteString("Sorry, but only trusted users can do that")
+		} else {
+			return
 		}
 
 	case ".noauto":
@@ -275,6 +299,8 @@ func OnMessage(session *discordgo.Session, message *discordgo.MessageCreate) {
 			fmt.Fprintf(&buf, "OK, I am no longer permitted to grant the %q role", rr.Name)
 		} else if valid {
 			buf.WriteString("Sorry, but only trusted users can do that")
+		} else {
+			return
 		}
 
 	case ".chan":
@@ -286,7 +312,67 @@ func OnMessage(session *discordgo.Session, message *discordgo.MessageCreate) {
 			fmt.Fprintf(&buf, "OK, from now on I will accept requests %s", newbotmsg)
 		} else if valid {
 			buf.WriteString("Sorry, but only trusted users can do that")
+		} else {
+			return
 		}
+
+	case ".karma":
+		if argument == "on" {
+			if isTrusted(guild, g, u) {
+				guild.KarmaEnabled = true
+				saveState()
+				fmt.Fprintf(&buf, "OK, karma tracking is now enabled")
+			} else {
+				buf.WriteString("Sorry, but only trusted users can do that")
+			}
+		} else if argument == "off" {
+			if isTrusted(guild, g, u) {
+				guild.KarmaEnabled = false
+				saveState()
+				fmt.Fprintf(&buf, "OK, karma tracking is now disabled")
+			} else {
+				buf.WriteString("Sorry, but only trusted users can do that")
+			}
+		} else if argument == "clear" || argument == "reset" {
+			if isTrusted(guild, g, u) {
+				guild.Karma = nil
+				saveState()
+				fmt.Fprintf(&buf, "OK, all karma scores have been reset")
+			} else {
+				buf.WriteString("Sorry, but only trusted users can do that")
+			}
+		} else {
+			mm, valid := parseMember(&buf, g.ID, argument)
+			if !valid {
+				return
+			}
+			uu := mm.User
+			buf.Reset()
+			fmt.Fprintf(&buf, "%s has %d karma points", uu.Mention(), guild.Karma[uu.ID])
+		}
+
+	case ".karmabump":
+		if !guild.KarmaEnabled {
+			return
+		}
+		mm, valid = parseMember(&buf, g.ID, argument)
+		if !valid {
+			return
+		}
+		if guild.Karma == nil {
+			guild.Karma = make(map[string]int)
+		}
+		uu := mm.User
+		guild.Karma[uu.ID]++
+		saveState()
+		buf.Reset()
+		fmt.Fprintf(&buf, "%s has %d karma points", uu.Mention(), guild.Karma[uu.ID])
+
+	case ".debug":
+		if isTrusted(guild, g, u) {
+			log.Printf("debug: %q", message.Content)
+		}
+		return
 
 	default:
 		return
@@ -440,4 +526,10 @@ const msgAdvancedHelp = `Advanced commands (for trusted users):
 
 .auto [role]      Mark [role] as self-grantable
 .noauto [role]    Mark [role] as non-self-grantable
+
+.karma on         Enable karma tracking
+.karma off        Disable karma tracking
+.karma clear      Reset all karma scores
+.karma [user]     Show [user]’s karma score
+[user]++
 `
