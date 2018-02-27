@@ -29,7 +29,7 @@ var (
 	flagStateFile = flag.String("statefile", "", "Path to state file (should be writable)")
 
 	reSpace     = regexp.MustCompile(`\s+`)
-	reBrackets  = regexp.MustCompile(`^\[(.*)\]$`)
+	reBrackets  = regexp.MustCompile(`\[\s*(<[#@][&!]?[0-9]+>)\s*\]`)
 	reKarmaBump = regexp.MustCompile(`^\s*(<@!?[0-9]+>)\s*\+\+\s*$`)
 )
 
@@ -106,16 +106,19 @@ func OnMessage(session *discordgo.Session, message *discordgo.MessageCreate) {
 		return
 	}
 
+	fullText := message.Content
+	fullText = reBrackets.ReplaceAllString(fullText, "$1")
+
 	var command, argument string
-	if reKarmaBump.MatchString(message.Content) {
-		match := reKarmaBump.FindStringSubmatch(message.Content)
+	if reKarmaBump.MatchString(fullText) {
+		match := reKarmaBump.FindStringSubmatch(fullText)
 		command = ".karmabump"
 		argument = match[1]
-	} else if strings.HasPrefix(message.Content, ".") {
-		args := reSpace.Split(message.Content, 2)
+	} else if strings.HasPrefix(fullText, ".") {
+		args := reSpace.Split(fullText, 2)
 		command = args[0]
 		if len(args) > 1 {
-			argument = reBrackets.ReplaceAllString(args[1], "$1")
+			argument = strings.TrimSpace(args[1])
 		}
 	} else {
 		return
@@ -158,8 +161,7 @@ func OnMessage(session *discordgo.Session, message *discordgo.MessageCreate) {
 	if guild.BotChannelId != "" && guild.BotChannelId != message.ChannelID {
 		bypassDebug := (command == ".debug") && isTrusted(guild, g, u)
 		bypassChan := (command == ".chan") && isTrusted(guild, g, u)
-		bypassKarma := (command == ".karma" || command == ".karmabump")
-		bypass := bypassDebug || bypassChan || bypassKarma
+		bypass := bypassDebug || bypassChan
 		if !bypass {
 			return
 		}
@@ -370,7 +372,7 @@ func OnMessage(session *discordgo.Session, message *discordgo.MessageCreate) {
 
 	case ".debug":
 		if isTrusted(guild, g, u) {
-			log.Printf("debug: %q", message.Content)
+			log.Printf("debug: %q", fullText)
 		}
 		return
 
@@ -511,6 +513,9 @@ const msgBasicHelp = `Basic commands:
 
 .iam [role]     Add yourself to a role
 .iamnot [role]  Remove yourself from a role
+
+.karma [user]   Show [user]’s karma score
+[user]++        Give one karma point to [user]
 `
 
 const msgAdvancedHelp = `Advanced commands (for trusted users):
@@ -530,6 +535,4 @@ const msgAdvancedHelp = `Advanced commands (for trusted users):
 .karma on         Enable karma tracking
 .karma off        Disable karma tracking
 .karma clear      Reset all karma scores
-.karma [user]     Show [user]’s karma score
-[user]++
 `
