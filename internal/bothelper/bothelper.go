@@ -94,17 +94,23 @@ func (h *BotHelper) ChannelByName(gid, name string) (*discordgo.Channel, error) 
 	var result *discordgo.Channel
 	var found uint = 0
 
+	examine := func(c *discordgo.Channel) {
+		if c.Type == discordgo.ChannelTypeGuildText || c.Type == discordgo.ChannelTypeGuildVoice {
+			k2 := Fold(c.Name)
+			if k1 == k2 {
+				result = c
+				found++
+			}
+		}
+	}
+
 	h.Session.State.RLock()
 	for _, g := range h.Session.State.Guilds {
 		if g.ID != gid {
 			continue
 		}
 		for _, c := range g.Channels {
-			k2 := Fold(c.Name)
-			if k1 == k2 {
-				result = c
-				found += 1
-			}
+			examine(c)
 		}
 	}
 	h.Session.State.RUnlock()
@@ -116,19 +122,15 @@ func (h *BotHelper) ChannelByName(gid, name string) (*discordgo.Channel, error) 
 		}
 
 		for _, c := range channels {
-			k2 := Fold(c.Name)
-			if k1 == k2 {
-				result = c
-				found += 1
-			}
+			examine(c)
 		}
 	}
 
+	if found > 1 {
+		return result, ErrManyFound
+	}
 	if found == 1 {
 		return result, nil
-	}
-	if found != 0 {
-		return result, ErrManyFound
 	}
 	return nil, ErrNotFound
 }
@@ -139,6 +141,65 @@ func (h *BotHelper) ChannelByArgument(gid, arg string) (*discordgo.Channel, erro
 		return h.ChannelById(match[1])
 	}
 	return h.ChannelByName(gid, arg)
+}
+
+func (h *BotHelper) CategoryById(id string) (*discordgo.Channel, error) {
+	return h.ChannelById(id)
+}
+
+func (h *BotHelper) CategoryByName(gid, name string) (*discordgo.Channel, error) {
+	k1 := Fold(name)
+
+	var result *discordgo.Channel
+	var found uint = 0
+
+	examine := func(c *discordgo.Channel) {
+		if c.Type == discordgo.ChannelTypeGuildCategory {
+			k2 := Fold(c.Name)
+			if k1 == k2 {
+				result = c
+				found++
+			}
+		}
+	}
+
+	h.Session.State.RLock()
+	for _, g := range h.Session.State.Guilds {
+		if g.ID != gid {
+			continue
+		}
+		for _, c := range g.Channels {
+			examine(c)
+		}
+	}
+	h.Session.State.RUnlock()
+
+	if found == 0 {
+		channels, err := h.Session.GuildChannels(gid)
+		if err != nil {
+			return nil, fmt.Errorf("GuildChannels: %v", err)
+		}
+
+		for _, c := range channels {
+			examine(c)
+		}
+	}
+
+	if found > 1 {
+		return result, ErrManyFound
+	}
+	if found == 1 {
+		return result, nil
+	}
+	return nil, ErrNotFound
+}
+
+func (h *BotHelper) CategoryByArgument(gid, arg string) (*discordgo.Channel, error) {
+	match := reChannelRef.FindStringSubmatch(arg)
+	if len(match) == 2 {
+		return h.CategoryById(match[1])
+	}
+	return h.CategoryByName(gid, arg)
 }
 
 func (h *BotHelper) RoleById(gid, rid string) (*discordgo.Role, error) {
@@ -196,11 +257,11 @@ func (h *BotHelper) RoleByName(gid, name string) (*discordgo.Role, error) {
 		}
 	}
 
+	if found > 1 {
+		return result, ErrManyFound
+	}
 	if found == 1 {
 		return result, nil
-	}
-	if found != 0 {
-		return result, ErrManyFound
 	}
 	return nil, ErrNotFound
 }
@@ -262,11 +323,11 @@ func (h *BotHelper) MemberByName(gid, name string) (*discordgo.Member, error) {
 		}
 	}
 
+	if found > 1 {
+		return result, ErrManyFound
+	}
 	if found == 1 {
 		return result, nil
-	}
-	if found != 0 {
-		return result, ErrManyFound
 	}
 	return nil, ErrNotFound
 }

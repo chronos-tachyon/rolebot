@@ -43,12 +43,15 @@ type botState struct {
 }
 
 type botGuildState struct {
-	Auto         map[string]struct{} `json:"auto"`
-	BotChannelID string              `json:"botChannelId,omitempty"`
-	TrustedRoles map[string]struct{} `json:"trustedRoles,omitempty"`
-	TrustedUsers map[string]struct{} `json:"trustedUsers,omitempty"`
-	KarmaEnabled bool                `json:"karmaEnabled,omitempty"`
-	Karma        map[string]int      `json:"karma,omitempty"`
+	Auto                     map[string]struct{} `json:"auto"`
+	BotChannelID             string              `json:"botChannelId,omitempty"`
+	TrustedRoles             map[string]struct{} `json:"trustedRoles,omitempty"`
+	TrustedUsers             map[string]struct{} `json:"trustedUsers,omitempty"`
+	KarmaEnabled             bool                `json:"karmaEnabled,omitempty"`
+	Karma                    map[string]int      `json:"karma,omitempty"`
+	PersonalChannelsEnabled  bool                `json:"personalChannelsEnabled,omitempty"`
+	PersonalChannelsParentID string              `json:"personalChannelsParentID"`
+	PersonalChannels         map[string]string   `json:"personalChannels"`
 }
 
 var (
@@ -284,10 +287,22 @@ func onMessage(session *discordgo.Session, message *discordgo.MessageCreate) {
 	switch command {
 	case ".help":
 		buf.WriteString("```")
-		buf.WriteString(msgBasicHelp)
+		buf.WriteString("Basic commands:\n")
+		buf.WriteString(msgBasicCoreHelp)
+		buf.WriteString(msgBasicRoleHelp)
+		if guild.KarmaEnabled {
+			buf.WriteString(msgBasicKarmaHelp)
+		}
+		if guild.PersonalChannelsEnabled {
+			buf.WriteString(msgBasicPersonalChannelsHelp)
+		}
 		if argument == "advanced" {
 			buf.WriteString("\n")
-			buf.WriteString(msgAdvancedHelp)
+			buf.WriteString("Advanced commands (for trusted users):\n")
+			buf.WriteString(msgAdvancedCoreHelp)
+			buf.WriteString(msgAdvancedRoleHelp)
+			buf.WriteString(msgAdvancedKarmaHelp)
+			buf.WriteString(msgAdvancedPersonalChannelsHelp)
 		}
 		buf.WriteString("```")
 
@@ -531,6 +546,142 @@ func onMessage(session *discordgo.Session, message *discordgo.MessageCreate) {
 		log.WithFields(fields).Info("karmabump")
 		fmt.Fprintf(&buf, "%s has %d karma points", uu.Mention(), guild.Karma[uu.ID])
 
+	case ".personal":
+		if argument == "on" {
+			if !trustedUser {
+				buf.WriteString("Sorry, but only trusted users can do that")
+				return
+			}
+
+			guild.PersonalChannelsEnabled = true
+			saveState()
+			log.WithFields(fields).Info("personal on")
+			fmt.Fprintf(&buf, "OK, personal channels are now enabled")
+			return
+		}
+
+		if argument == "off" {
+			if !trustedUser {
+				buf.WriteString("Sorry, but only trusted users can do that")
+				return
+			}
+
+			guild.PersonalChannelsEnabled = false
+			saveState()
+			log.WithFields(fields).Info("personal off")
+			fmt.Fprintf(&buf, "OK, personal channels are now disabled")
+			return
+		}
+
+		if argument == "create" {
+			if !guild.PersonalChannelsEnabled {
+				buf.Reset()
+				return
+			}
+
+			fields["targetChannelName"] = nick
+			cc, err := session.GuildChannelCreate(g.ID, nick, "text")
+			if err != nil {
+				log.WithError(err).WithFields(fields).Error("session.GuildChannelCreate")
+				buf.WriteString("Error creating channel!")
+				return
+			}
+			fields["targetChannelID"] = cc.ID
+
+			if len(guild.PersonalChannelsParentID) != 0 {
+				cc, err = session.ChannelEditComplex(cc.ID, &discordgo.ChannelEdit{
+					ParentID: guild.PersonalChannelsParentID,
+				})
+				if err != nil {
+					log.WithError(err).WithFields(fields).Error("session.ChannelEditComplex")
+					session.ChannelDelete(cc.ID)
+					buf.WriteString("Error creating channel!")
+					return
+				}
+			}
+
+			if guild.PersonalChannels == nil {
+				guild.PersonalChannels = make(map[string]string)
+			}
+			guild.PersonalChannels[u.ID] = cc.ID
+			log.WithFields(fields).Info("personal create")
+			fmt.Fprintf(&buf, "OK, I created your channel. %s", channelMention(cc))
+			return
+		}
+
+		if argument == "destroy" {
+			if !guild.PersonalChannelsEnabled {
+				buf.Reset()
+				return
+			}
+
+			cid, found := guild.PersonalChannels[u.ID]
+			if !found {
+				buf.WriteString("You don't have a personal channel.")
+				return
+			}
+
+			cc, err := session.Channel(cid)
+			if err != nil {
+				log.WithError(err).WithFields(fields).Error("session.Channel")
+				buf.WriteString("Error finding your personal channel!")
+				return
+			}
+
+			fields["targetChannelID"] = cc.ID
+			fields["targetChannelName"] = cc.Name
+			_, err = gHelper.ChannelDelete(cc.ID)
+			if err != nil {
+				log.WithError(err).WithFields(fields).Error("helper.ChannelDelete")
+				buf.WriteString("Error deleting channel!")
+				return
+			}
+
+			log.WithFields(fields).Info("personal destroy")
+			buf.WriteString("OK, I destroyed your personal channel.")
+			return
+		}
+
+		buf.WriteString("Sorry, I don't know what that means.")
+		return
+
+	case ".parent":
+		if !trustedUser {
+			buf.WriteString("Sorry, but only trusted users can do that")
+			return
+		}
+
+		if argument == "none" {
+			guild.PersonalChannelsParentID = ""
+			saveState()
+			log.WithFields(fields).Info("parent")
+			buf.WriteString("OK, from now on any any personal channels I create will have no parent category.")
+			return
+		}
+
+		cc, err := gHelper.CategoryByArgument(g.ID, argument)
+		if err == bothelper.ErrManyFound {
+			fmt.Fprintf(&buf, "Sorry, but I see multiple categories named %q", cc.Name)
+			return
+		}
+		if err == bothelper.ErrNotFound {
+			buf.WriteString("Sorry, but I don't see a category with that name")
+			return
+		}
+		if err != nil {
+			log.WithError(err).WithFields(fields).Error("helper.CategoryByArgument")
+			buf.WriteString("Error while searching for category!")
+			return
+		}
+		fields["targetCategoryID"] = cc.ID
+		fields["targetCategoryName"] = cc.Name
+
+		guild.PersonalChannelsParentID = cc.ID
+		saveState()
+		log.WithFields(fields).Info("parent")
+		fmt.Fprintf(&buf, "OK, from now on any personal channels I create will be children of %s.", cc.Name)
+		return
+
 	case ".debug":
 		if trustedUser {
 			log.WithFields(fields).Info("debug")
@@ -538,8 +689,13 @@ func onMessage(session *discordgo.Session, message *discordgo.MessageCreate) {
 		return
 
 	default:
+		buf.Reset()
 		return
 	}
+}
+
+func channelMention(c *discordgo.Channel) string {
+	return fmt.Sprintf("<#%s>", c.ID)
 }
 
 func parseChan(buf *bytes.Buffer, fields log.Fields, c *discordgo.Channel, g *discordgo.Guild, arg string) (cid, msg string, valid bool) {
@@ -691,35 +847,51 @@ func jsonMarshal(v interface{}) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-const msgBasicHelp = `Basic commands:
-
+const msgBasicCoreHelp = `
 .help           Show help for basic commands
 .help advanced  Show help for all commands
+`
 
+const msgBasicRoleHelp = `
 .roles          List available roles
-
 .iam [role]     Add yourself to a role
 .iamnot [role]  Remove yourself from a role
+`
 
+const msgBasicKarmaHelp = `
 .karma [user]   Show [user]’s karma score
 [user]++        Give one karma point to [user]
 `
 
-const msgAdvancedHelp = `Advanced commands (for trusted users):
+const msgBasicPersonalChannelsHelp = `
+.personal create   Create your personal channel
+.personal destroy  Destroy your personal channel
+`
 
-.chan any         Listen for commands on any channel
-.chan this        Listen for commands on this channel only
-.chan [chan]      Listen for commands on #[chan] only
+const msgAdvancedCoreHelp = `
+.chan any     Listen for commands on any channel
+.chan this    Listen for commands on this channel only
+.chan [chan]  Listen for commands on #[chan] only
 
 .trust [user]     Mark [user] as a trusted user
 .notrust [user]   Mark [user] as a non-trusted user
 .rtrust [role]    Mark [role] as a trusted role
 .nortrust [role]  Mark [role] as a non-trusted role
+`
 
-.auto [role]      Mark [role] as self-grantable
-.noauto [role]    Mark [role] as non-self-grantable
+const msgAdvancedRoleHelp = `
+.auto [role]    Mark [role] as self-grantable
+.noauto [role]  Mark [role] as non-self-grantable
+`
 
-.karma on         Enable karma tracking
-.karma off        Disable karma tracking
-.karma clear      Reset all karma scores
+const msgAdvancedKarmaHelp = `
+.karma on     Enable karma tracking
+.karma off    Disable karma tracking
+.karma clear  Reset all karma scores
+`
+
+const msgAdvancedPersonalChannelsHelp = `
+.personal off       Disable personal channels
+.personal on        Enable personal channels
+.parent [category]  Set parent category for new personal channels
 `
