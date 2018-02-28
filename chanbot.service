@@ -1,0 +1,14 @@
+[Unit]
+Description=ChanBot Discord Bot
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/chanbot -logfile /var/log/chanbot/chanbot.log -tokenfile /var/lib/chanbot/token
+Restart=always
+User=chanbot
+Group=chanbot
+
+[Install]
+WantedBy=multi-user.target
+
+; vim:set filetype=systemd:

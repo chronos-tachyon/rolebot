@@ -1,0 +1,14 @@
+[Unit]
+Description=RoleBot Discord Bot
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/rolebot -logfile /var/log/rolebot/rolebot.log -tokenfile /var/lib/rolebot/token -statefile /var/lib/rolebot/state
+Restart=always
+User=rolebot
+Group=rolebot
+
+[Install]
+WantedBy=multi-user.target
+
+; vim:set filetype=systemd:
