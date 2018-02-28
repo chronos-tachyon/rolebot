@@ -1,7 +1,8 @@
 # RoleBot
 A bot for user-assigned chat roles in Discord.
 
-## Using RoleBot
+## For users
+### Using RoleBot
 
 First, make sure you're in the right channel. There is probably a channel
 called `#botspam`.  Any bot commands you type should be entered there.
@@ -10,7 +11,8 @@ To give yourself the role "foo", type `.iam foo`.
 
 If you decide you don't want the role "foo" anymore, type `.iamnot foo`.
 
-## Adding RoleBot to your server
+## For server owners
+### Adding RoleBot to your server
 
 If you want RoleBot and you trust me to keep it running, then all you need to
 do is this:
@@ -24,7 +26,7 @@ do is this:
 
 * Give RoleBot the role that you created
 
-## Setting up RoleBot for your server
+### Setting up RoleBot for your server
 
 When the bot is first added to the server, it will only accept admin commands
 from the server owner. The server owner can indicate that other users and
@@ -45,36 +47,50 @@ To allow regular users to give themselves role "foo", type `.auto foo`.
 
 To lock down the "foo" role, type `.noauto foo`.
 
-## Running your own RoleBot under Linux
+## For developers and advanced server owners
+### Running your own RoleBot under Linux
 
-* Install Go and set it up for your local environment
+First, if you don't already have it, install Go:
 
-* Note that the following instructions assume a `GOPATH` of `~/go`
+```sh
+mkdir -p ~/tmp
+cd ~/tmp
+curl -O https://dl.google.com/go/go1.10.linux-amd64.tar.gz
+tar xzf go1.10.linux-amd64.tar.gz
+mv go ~/goroot
+echo 'export GOPATH="${HOME}/go"' >>~/.bashrc
+echo 'export GOROOT="${HOME}/goroot"' >>~/.bashrc
+echo 'export PATH="${GOPATH}/bin:${GOROOT}/bin:${PATH}"' >>~/.bashrc
+. ~/.bashrc
+```
 
-* Fetch the source code with `go get github.com/chronos-tachyon/rolebot`
+Next, install the vgo tool:
 
-* Run `mkdir ~/.rolebot`
+```sh
+go get -u golang.org/x/vgo
+```
 
-* Run `cp ~/go/src/github.com/chronos-tachyon/rolebot/*.sh ~/.rolebot`
+Now it's time to download, build, and install Rolebot:
 
-* Visit https://discordapp.com/developers/applications/me
+```sh
+git clone https://github.com/chronos-tachyon/rolebot.git ~/rolebot
+cd ~/rolebot
+./build.sh
+sudo ./rolebot.install.sh
+```
 
-* Create an app — it needs a name and an icon
+The install script will prompt you to obtain a Bot User token.  You will
+need to visit [https://discordapp.com/developers/applications/me][apps]
+and create a Discord App for your bot, at which point you'll be able to
+obtain the secret token for the bot account.
 
-* Once the app is created, give it a Bot User
+Finally, add your bot to some servers!  First, go back to
+[the apps page][apps], click through to your app, and copy the Client ID.
+(It's at the top of the page.)  Second, add the bot to your server by
+visiting `https://discordapp.com/oauth2/authorize?client_id=<id>&scope=bot`
+and granting access to the server.
 
-* Click to reveal the Bot User token
+Lastly, you will need to grant the bot some limited moderator powers.  Bot
+permissions on the server work just like people permissions.
 
-* Run `touch ~/.rolebot/token && chmod 0600 ~/.rolebot/token`
-
-* Run `cat > ~/.rolebot/token`, paste the token, hit ENTER then CTRL-D
-
-* Run `~/.rolebot/start.sh` to start the bot, `~/.rolebot/stop.sh` to stop it,
-  or `~/.rolebot/restart.sh` to restart it
-
-* Go back to the bot application page and copy the client ID
-
-* Add the bot to your server by visiting
-  `https://discordapp.com/oauth2/authorize?client_id=<id>&scope=bot`,
-  where `<id>` is the value from the bot application page
-
+[apps]: https://discordapp.com/developers/applications/me
