@@ -5,21 +5,26 @@ tmpdir="$(mktemp -t -d install-rolebot.$$.XXXXXXXX)"
 trap 'rm -rf "$tmpdir"' EXIT
 
 if ! getent passwd rolebot &>/dev/null ; then
-  useradd \
+  adduser \
     --system \
-    --user-group \
-    --home-dir /var/lib/rolebot \
-    --comment rolebot \
+    --group \
+    --shell /bin/bash \
+    --gecos RoleBot \
+    --disabled-password \
     rolebot
 fi
 
-install -o rolebot -g rolebot -m 0750 -d /var/lib/rolebot
-install -o rolebot -g adm -m 0750 -d /var/log/rolebot
-install -o root -g root -m 0755 rolebot /usr/local/bin/rolebot
-install -o root -g root -m 0644 rolebot.service /etc/systemd/system/rolebot.service
-install -o root -g root -m 0644 rolebot.logrotate /etc/logrotate.d/rolebot
+rolebot_home=~rolebot
+sed -e "s|/home/rolebot/|${rolebot_home}/|g" < rolebot.exec.sh   > "${tmpdir}/exec.sh"
+sed -e "s|/home/rolebot/|${rolebot_home}/|g" < rolebot.logrotate > "${tmpdir}/logrotate"
+sed -e "s|/home/rolebot/|${rolebot_home}/|g" < rolebot.service   > "${tmpdir}/service"
 
-if [ ! -f /var/lib/rolebot/token ]; then
+install -o root     -g root     -m 0755 rolebot               /usr/local/bin/rolebot
+install -o root     -g root     -m 0644 "${tmpdir}/service"   /etc/systemd/system/rolebot.service
+install -o root     -g root     -m 0644 "${tmpdir}/logrotate" /etc/logrotate.d/rolebot
+install -o rolebot  -g rolebot  -m 0700 "${tmpdir}/exec.sh"   "${rolebot_home}/exec.sh"
+
+if [ ! -f "${rolebot_home}/token" ]; then
   echo "You need an OAuth2 token!"
   echo "Step 1: Visit https://discordapp.com/developers/applications/me"
   echo "Step 2: Register a bot account"
@@ -27,13 +32,14 @@ if [ ! -f /var/lib/rolebot/token ]; then
   echo "Step 4: Under Bot, find Token and click 'click to reveal'"
   read -p "Token: " token
   ( umask 077; echo "$token" > "${tmpdir}/token" )
-  install -o rolebot -g rolebot -m 0400 "${tmpdir}/token" /var/lib/rolebot/token
+  install -o rolebot -g rolebot -m 0400 "${tmpdir}/token" "${rolebot_home}/token"
 fi
 
-if [ ! -f /var/lib/rolebot/state ]; then
+if [ ! -f "${rolebot_home}/state" ]; then
   ( umask 077; echo "{}" > "${tmpdir}/state" )
-  install -o rolebot -g rolebot -m 0600 "${tmpdir}/state" /var/lib/rolebot/state
+  install -o rolebot -g rolebot -m 0600 "${tmpdir}/state" "${rolebot_home}/state"
 fi
 
+systemctl daemon-reload
 systemctl enable rolebot.service
 systemctl start rolebot.service

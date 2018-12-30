@@ -1,4 +1,4 @@
-/var/log/rolebot/*.log {
+/home/rolebot/logs/*.log {
 	weekly
 	missingok
 	rotate 12
@@ -7,7 +7,7 @@
 	notifempty
 	sharedscripts
 	postrotate
-		pkill -HUP -u rolebot -f /usr/local/bin/rolebot
+		pkill -HUP -u rolebot -f rolebot
 	endscript
 }
 

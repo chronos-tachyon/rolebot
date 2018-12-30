@@ -1,4 +1,5 @@
 #!/bin/bash
 set -eu -o pipefail
 set -x
-vgo build ./cmd/rolebot
+export GO111MODULE=on
+go build ./cmd/rolebot

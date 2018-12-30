@@ -3,7 +3,7 @@ Description=RoleBot Discord Bot
 After=network.target
 
 [Service]
-ExecStart=/usr/local/bin/rolebot -logfile /var/log/rolebot/rolebot.log -tokenfile /var/lib/rolebot/token -statefile /var/lib/rolebot/state
+ExecStart=/home/rolebot/exec.sh
 Restart=always
 User=rolebot
 Group=rolebot
