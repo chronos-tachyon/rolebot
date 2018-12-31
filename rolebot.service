@@ -3,7 +3,7 @@ Description=RoleBot Discord Bot
 After=network.target
 
 [Service]
-ExecStart=/home/rolebot/exec.sh
+ExecStart=/home/rolebot/bin/exec.sh
 Restart=always
 User=rolebot
 Group=rolebot

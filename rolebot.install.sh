@@ -22,7 +22,8 @@ sed -e "s|/home/rolebot/|${rolebot_home}/|g" < rolebot.service   > "${tmpdir}/se
 install -o root     -g root     -m 0755 rolebot               /usr/local/bin/rolebot
 install -o root     -g root     -m 0644 "${tmpdir}/service"   /etc/systemd/system/rolebot.service
 install -o root     -g root     -m 0644 "${tmpdir}/logrotate" /etc/logrotate.d/rolebot
-install -o rolebot  -g rolebot  -m 0700 "${tmpdir}/exec.sh"   "${rolebot_home}/exec.sh"
+install -o rolebot  -g rolebot  -m 0700 -d                    "${rolebot_home}/bin"
+install -o rolebot  -g rolebot  -m 0700 "${tmpdir}/exec.sh"   "${rolebot_home}/bin/exec.sh"
 
 if [ ! -f "${rolebot_home}/token" ]; then
   echo "You need an OAuth2 token!"
