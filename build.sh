@@ -1,5 +1,5 @@
 #!/bin/bash
 set -eu -o pipefail
+version="$(cat .version || echo devel)"
 set -x
-export GO111MODULE=on
-go build ./cmd/rolebot
+go build -ldflags="-X main.appVersion=${version}" ./cmd/rolebot

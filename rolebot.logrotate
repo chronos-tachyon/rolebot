@@ -1,4 +1,4 @@
-/home/rolebot/logs/*.log {
+/home/rolebot/logs/*.json {
 	weekly
 	missingok
 	rotate 12

@@ -3,29 +3,53 @@ package main
 import (
 	"bytes"
 	"encoding/json"
-	"flag"
 	"fmt"
+	"io"
 	"io/ioutil"
+	stdlog "log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/bwmarrin/discordgo"
-	"github.com/sirupsen/logrus"
+	"github.com/hashicorp/go-multierror"
+	getopt "github.com/pborman/getopt/v2"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/journald"
+	"github.com/rs/zerolog/log"
 
 	"github.com/chronos-tachyon/rolebot/internal/bothelper"
 )
 
+var appVersion = "devel"
+
 var (
-	flagJSON      = flag.Bool("json", false, "Write JSON to log file")
-	flagLogfile   = flag.String("logfile", "", "Path to log file")
-	flagTokenFile = flag.String("tokenfile", "", "Path to text file containing bot token")
-	flagStateFile = flag.String("statefile", "", "Path to state file (should be writable)")
+	flagVersion     bool
+	flagDebug       bool
+	flagTrace       bool
+	flagLogStderr   bool
+	flagLogJournald bool
+	flagLogFile     string
+	flagTokenFile   string
+	flagStateFile   string
 )
+
+func init() {
+	getopt.FlagLong(&flagVersion, "version", 'V', "print version and exit")
+	getopt.FlagLong(&flagDebug, "verbose", 'v', "enable debug logging")
+	getopt.FlagLong(&flagTrace, "debug", 'd', "enable debug and trace logging")
+	getopt.FlagLong(&flagLogStderr, "log-stderr", 'S', "log JSON to stderr")
+	getopt.FlagLong(&flagLogJournald, "log-journald", 'J', "log to journald")
+	getopt.FlagLong(&flagLogFile, "log-file", 'l', "log JSON to file")
+	getopt.FlagLong(&flagTokenFile, "tokenfile", 0, "Path to text file containing bot token")
+	getopt.FlagLong(&flagStateFile, "statefile", 0, "Path to state file (should be writable)")
+}
 
 const (
 	maxMembersPerFetch = 1000
@@ -55,30 +79,99 @@ type botGuildState struct {
 }
 
 var (
+	gLogger  *logWriter
 	gHelper  *bothelper.BotHelper
 	gStateMu sync.Mutex
 	gState   botState
-	gLogMu   sync.Mutex
-	gLog     *os.File
 )
 
 func main() {
-	flag.Parse()
+	getopt.Parse()
 
-	sighup()
+	if flagVersion {
+		fmt.Println(appVersion)
+		os.Exit(0)
+	}
 
-	raw, err := ioutil.ReadFile(*flagTokenFile)
+	if flagLogStderr && flagLogJournald {
+		fmt.Fprintln(os.Stderr, "fatal: flags '--log-stderr' and '--log-journald' are mutually exclusive")
+		os.Exit(1)
+	}
+	if flagLogStderr && flagLogFile != "" {
+		fmt.Fprintln(os.Stderr, "fatal: flags '--log-stderr' and '--log-file' are mutually exclusive")
+		os.Exit(1)
+	}
+	if flagLogJournald && flagLogFile != "" {
+		fmt.Fprintln(os.Stderr, "fatal: flags '--log-journald' and '--log-file' are mutually exclusive")
+		os.Exit(1)
+	}
+
+	if flagLogFile != "" {
+		abs, err := filepath.Abs(flagLogFile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "fatal: %v\n", err)
+			os.Exit(1)
+		}
+		flagLogFile = abs
+	}
+
+	zerolog.TimeFieldFormat = zerolog.TimeFormatUnix
+	zerolog.DurationFieldUnit = time.Second
+	zerolog.DurationFieldInteger = false
+	zerolog.SetGlobalLevel(zerolog.InfoLevel)
+	if flagDebug {
+		zerolog.SetGlobalLevel(zerolog.DebugLevel)
+	}
+	if flagTrace {
+		zerolog.SetGlobalLevel(zerolog.TraceLevel)
+	}
+
+	switch {
+	case flagLogStderr:
+		// do nothing
+
+	case flagLogJournald:
+		log.Logger = log.Output(journald.NewJournalDWriter())
+
+	case flagLogFile != "":
+		var err error
+		gLogger, err = newLogWriter(flagLogFile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "fatal: failed to open log file for append: %q: %v\n", flagLogFile, err)
+			os.Exit(1)
+		}
+		defer gLogger.Close()
+		log.Logger = log.Output(gLogger)
+
+	default:
+		log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr})
+	}
+
+	stdlog.SetFlags(0)
+	stdlog.SetOutput(log.Logger)
+
+	logger := &log.Logger
+
+	sighup(logger)
+
+	raw, err := ioutil.ReadFile(flagTokenFile)
 	if err != nil {
-		logrus.WithError(err).Fatal("ioutil.ReadFile")
+		logger.Fatal().
+			Str("tokenFile", flagTokenFile).
+			Err(err).
+			Msg("ioutil.ReadFile")
 	}
 	token := "Bot " + string(bytes.TrimRight(raw, "\r\n"))
 
-	raw, err = ioutil.ReadFile(*flagStateFile)
+	raw, err = ioutil.ReadFile(flagStateFile)
 	if os.IsNotExist(err) {
 		err = nil
 	}
 	if err != nil {
-		logrus.WithError(err).Fatal("ioutil.ReadFile")
+		logger.Fatal().
+			Str("stateFile", flagStateFile).
+			Err(err).
+			Msg("ioutil.ReadFile")
 	}
 	if len(raw) == 0 {
 		raw = append(raw, "{}"...)
@@ -86,31 +179,41 @@ func main() {
 
 	err = json.Unmarshal(raw, &gState)
 	if err != nil {
-		logrus.WithError(err).Fatal("json.Unmarshal")
+		logger.Fatal().
+			Str("stateFile", flagStateFile).
+			Err(err).
+			Msg("json.Unmarshal")
 	}
 
 	session, err := discordgo.New(token)
 	if err != nil {
-		logrus.WithError(err).Fatal("discordgo.New")
+		logger.Fatal().
+			Err(err).
+			Msg("discordgo.New")
 	}
 	session.ShouldReconnectOnError = true
 	session.StateEnabled = true
 	session.SyncEvents = false
-	session.AddHandler(onMessage)
+	session.AddHandler(func(session *discordgo.Session, message *discordgo.MessageCreate) {
+		onMessage(logger, session, message)
+	})
 
 	gHelper = bothelper.New(session)
 
 	err = session.Open()
 	if err != nil {
-		logrus.WithError(err).Fatal("session.Open")
+		logger.Fatal().
+			Err(err).
+			Msg("session.Open")
 	}
 	defer session.Close()
 
-	mainLoop()
+	mainLoop(logger)
 }
 
-func mainLoop() {
-	logrus.Info("RoleBot is now running. Press Ctrl-C to exit.")
+func mainLoop(logger *zerolog.Logger) {
+	logger.Info().
+		Msg("RoleBot is now running. Press Ctrl-C to exit.")
 
 	sigch := make(chan os.Signal, 1)
 	signal.Notify(sigch, os.Interrupt, os.Kill, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
@@ -118,61 +221,32 @@ func mainLoop() {
 
 	for {
 		sig := <-sigch
-		logrus.WithField("sig", sig).Info("got signal")
+		logger.Info().
+			Stringer("sig", sig).
+			Msg("got signal")
 		switch sig {
 		case nil:
 			return
 		case os.Interrupt, os.Kill, syscall.SIGINT, syscall.SIGTERM:
 			return
 		case syscall.SIGHUP:
-			sighup()
+			sighup(logger)
 		}
 	}
 }
 
-func sighup() {
-	gLogMu.Lock()
-	defer gLogMu.Unlock()
-
-	var formatter logrus.Formatter
-	if *flagJSON {
-		formatter = &logrus.JSONFormatter{
-			TimestampFormat: "2006-01-02T15:04:05Z0700",
-			FieldMap: logrus.FieldMap{
-				logrus.FieldKeyTime:  "@timestamp",
-				logrus.FieldKeyLevel: "@level",
-				logrus.FieldKeyMsg:   "@message",
-			},
-		}
-	} else {
-		formatter = &logrus.TextFormatter{
-			TimestampFormat: "2006-01-02 15:04:05 Z0700",
+func sighup(logger *zerolog.Logger) {
+	if gLogger != nil {
+		err := gLogger.Rotate()
+		if err != nil {
+			logger.Fatal().
+				Err(err).
+				Msg("LogWriter.Rotate")
 		}
 	}
-
-	if len(*flagLogfile) == 0 {
-		logrus.SetFormatter(formatter)
-		logrus.SetLevel(logrus.InfoLevel)
-		return
-	}
-
-	f, err := os.OpenFile(*flagLogfile, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
-	if err != nil {
-		logrus.WithError(err).Fatal("os.OpenFile")
-	}
-	defer func() {
-		if f != nil {
-			f.Close()
-		}
-	}()
-
-	logrus.SetFormatter(formatter)
-	logrus.SetLevel(logrus.InfoLevel)
-	logrus.SetOutput(f)
-	gLog, f = f, gLog
 }
 
-func onMessage(session *discordgo.Session, message *discordgo.MessageCreate) {
+func onMessage(logger *zerolog.Logger, session *discordgo.Session, message *discordgo.MessageCreate) {
 	self := gHelper.Me()
 	u := message.Author
 	if u.ID == self.ID {
@@ -199,31 +273,44 @@ func onMessage(session *discordgo.Session, message *discordgo.MessageCreate) {
 		return
 	}
 
-	fields := logrus.Fields{
-		"command":          command,
-		"argument":         argument,
-		"messageContent":   message.Content,
-		"messageAuthorID":  message.Author.ID,
-		"messageChannelID": message.ChannelID,
-	}
+	tmpLogger := logger.With().
+		Str("command", command).
+		Str("argument", argument).
+		Str("messageContent", message.Content).
+		Str("messageAuthorID", message.Author.ID).
+		Str("messageChannelID", message.ChannelID).
+		Logger()
+	logger = &tmpLogger
 
 	c, err := session.Channel(message.ChannelID)
 	if err != nil {
-		logrus.WithError(err).WithFields(fields).Error("session.Channel")
+		logger.Error().
+			Err(err).
+			Msg("session.Channel")
 		return
 	}
-	fields["messageChannelName"] = c.Name
+
+	logger.UpdateContext(func(logctx zerolog.Context) zerolog.Context {
+		return logctx.Str("messageChannelName", c.Name)
+	})
 
 	g, err := gHelper.GuildById(c.GuildID)
 	if err != nil {
-		logrus.WithError(err).WithFields(fields).Error("helper.Guild")
+		logger.Error().
+			Err(err).
+			Msg("helper.Guild")
 		return
 	}
-	fields["messageGuildID"] = g.ID
+
+	logger.UpdateContext(func(logctx zerolog.Context) zerolog.Context {
+		return logctx.Str("messageGuildID", g.ID)
+	})
 
 	m, err := gHelper.MemberById(g.ID, message.Author.ID)
 	if err != nil {
-		logrus.WithError(err).WithFields(fields).Error("helper.MemberById")
+		logger.Error().
+			Err(err).
+			Msg("helper.MemberById")
 		return
 	}
 
@@ -231,8 +318,12 @@ func onMessage(session *discordgo.Session, message *discordgo.MessageCreate) {
 	if nick == "" {
 		nick = u.Username
 	}
-	fields["messageAuthorName"] = u.Username + "#" + u.Discriminator
-	fields["messageAuthorNick"] = nick
+
+	logger.UpdateContext(func(logctx zerolog.Context) zerolog.Context {
+		return logctx.
+			Str("messageAuthorName", u.Username+"#"+u.Discriminator).
+			Str("messageAuthorNick", nick)
+	})
 
 	gStateMu.Lock()
 	defer gStateMu.Unlock()
@@ -256,8 +347,10 @@ func onMessage(session *discordgo.Session, message *discordgo.MessageCreate) {
 		guild.TrustedUsers = make(map[string]struct{})
 	}
 
-	trustedUser := isTrusted(guild, g, u)
-	fields["messageTrusted"] = trustedUser
+	trustedUser := isTrusted(logger, guild, g, u)
+	logger.UpdateContext(func(logctx zerolog.Context) zerolog.Context {
+		return logctx.Bool("messageTrusted", trustedUser)
+	})
 
 	if guild.BotChannelID != "" && guild.BotChannelID != message.ChannelID {
 		bypassDebug := (command == ".debug") && trustedUser
@@ -277,10 +370,14 @@ func onMessage(session *discordgo.Session, message *discordgo.MessageCreate) {
 			return
 		}
 		str := buf.String()
-		fields["replyText"] = str
+		logger.UpdateContext(func(logctx zerolog.Context) zerolog.Context {
+			return logctx.Str("replyText", str)
+		})
 		_, err := session.ChannelMessageSend(message.ChannelID, str)
 		if err != nil {
-			logrus.WithError(err).WithFields(fields).Error("session.ChannelMessageSend")
+			logger.Error().
+				Err(err).
+				Msg("session.ChannelMessageSend")
 		}
 	}()
 
@@ -323,7 +420,7 @@ func onMessage(session *discordgo.Session, message *discordgo.MessageCreate) {
 		}
 
 	case ".iam":
-		rr, valid := parseRole(&buf, fields, g, argument)
+		rr, valid := parseRole(&buf, logger, g, argument)
 		if !valid {
 			return
 		}
@@ -335,16 +432,19 @@ func onMessage(session *discordgo.Session, message *discordgo.MessageCreate) {
 
 		err := session.GuildMemberRoleAdd(g.ID, u.ID, rr.ID)
 		if err != nil {
-			logrus.WithError(err).WithFields(fields).Error("session.GuildMemberRoleAdd")
+			logger.Error().
+				Err(err).
+				Msg("session.GuildMemberRoleAdd")
 			buf.WriteString("Error while granting role!")
 			return
 		}
 
-		logrus.WithFields(fields).Info("iam")
+		logger.Info().
+			Msg("iam")
 		fmt.Fprintf(&buf, "OK, you are now %q", rr.Name)
 
 	case ".iamnot":
-		rr, valid := parseRole(&buf, fields, g, argument)
+		rr, valid := parseRole(&buf, logger, g, argument)
 		if !valid {
 			return
 		}
@@ -356,16 +456,19 @@ func onMessage(session *discordgo.Session, message *discordgo.MessageCreate) {
 
 		err = session.GuildMemberRoleRemove(g.ID, u.ID, rr.ID)
 		if err != nil {
-			logrus.WithError(err).WithFields(fields).Error("session.GuildMemberRoleRemove")
+			logger.Error().
+				Err(err).
+				Msg("session.GuildMemberRoleRemove")
 			buf.WriteString("Error while revoking role!")
 			return
 		}
 
-		logrus.WithFields(fields).Info("iamnot")
+		logger.Info().
+			Msg("iamnot")
 		fmt.Fprintf(&buf, "OK, you are not %q anymore", rr.Name)
 
 	case ".trust":
-		mm, valid := parseMember(&buf, fields, g, argument)
+		mm, valid := parseMember(&buf, logger, g, argument)
 		if !valid {
 			return
 		}
@@ -376,12 +479,13 @@ func onMessage(session *discordgo.Session, message *discordgo.MessageCreate) {
 		}
 
 		guild.TrustedUsers[mm.User.ID] = struct{}{}
-		saveState()
-		logrus.WithFields(fields).Info("trust")
+		saveState(logger)
+		logger.Info().
+			Msg("trust")
 		fmt.Fprintf(&buf, "OK, I now trust %s", mm.User.Mention())
 
 	case ".notrust":
-		mm, valid := parseMember(&buf, fields, g, argument)
+		mm, valid := parseMember(&buf, logger, g, argument)
 		if !valid {
 			return
 		}
@@ -392,12 +496,13 @@ func onMessage(session *discordgo.Session, message *discordgo.MessageCreate) {
 		}
 
 		delete(guild.TrustedUsers, mm.User.ID)
-		saveState()
-		logrus.WithFields(fields).Info("notrust")
+		saveState(logger)
+		logger.Info().
+			Msg("notrust")
 		fmt.Fprintf(&buf, "OK, I no longer trust %s", mm.User.Mention())
 
 	case ".rtrust":
-		rr, valid := parseRole(&buf, fields, g, argument)
+		rr, valid := parseRole(&buf, logger, g, argument)
 		if !valid {
 			return
 		}
@@ -408,12 +513,13 @@ func onMessage(session *discordgo.Session, message *discordgo.MessageCreate) {
 		}
 
 		guild.TrustedRoles[rr.ID] = struct{}{}
-		saveState()
-		logrus.WithFields(fields).Info("rtrust")
+		saveState(logger)
+		logger.Info().
+			Msg("rtrust")
 		fmt.Fprintf(&buf, "OK, I now trust everyone with the %q role", rr.Name)
 
 	case ".nortrust":
-		rr, valid := parseRole(&buf, fields, g, argument)
+		rr, valid := parseRole(&buf, logger, g, argument)
 		if !valid {
 			return
 		}
@@ -424,12 +530,13 @@ func onMessage(session *discordgo.Session, message *discordgo.MessageCreate) {
 		}
 
 		delete(guild.TrustedRoles, rr.ID)
-		saveState()
-		logrus.WithFields(fields).Info("nortrust")
+		saveState(logger)
+		logger.Info().
+			Msg("nortrust")
 		fmt.Fprintf(&buf, "OK, I no longer trust everyone with the %q role", rr.Name)
 
 	case ".auto":
-		rr, valid := parseRole(&buf, fields, g, argument)
+		rr, valid := parseRole(&buf, logger, g, argument)
 		if !valid {
 			return
 		}
@@ -440,12 +547,13 @@ func onMessage(session *discordgo.Session, message *discordgo.MessageCreate) {
 		}
 
 		guild.Auto[rr.ID] = struct{}{}
-		saveState()
-		logrus.WithFields(fields).Info("auto")
+		saveState(logger)
+		logger.Info().
+			Msg("auto")
 		fmt.Fprintf(&buf, "OK, I am now permitted to grant the %q role", rr.Name)
 
 	case ".noauto":
-		rr, valid := parseRole(&buf, fields, g, argument)
+		rr, valid := parseRole(&buf, logger, g, argument)
 		if !valid {
 			return
 		}
@@ -456,12 +564,13 @@ func onMessage(session *discordgo.Session, message *discordgo.MessageCreate) {
 		}
 
 		delete(guild.Auto, rr.ID)
-		saveState()
-		logrus.WithFields(fields).Info("noauto")
+		saveState(logger)
+		logger.Info().
+			Msg("noauto")
 		fmt.Fprintf(&buf, "OK, I am no longer permitted to grant the %q role", rr.Name)
 
 	case ".chan":
-		cid, msg, valid := parseChan(&buf, fields, c, g, argument)
+		cid, msg, valid := parseChan(&buf, logger, c, g, argument)
 		if !valid {
 			return
 		}
@@ -472,8 +581,9 @@ func onMessage(session *discordgo.Session, message *discordgo.MessageCreate) {
 		}
 
 		guild.BotChannelID = cid
-		saveState()
-		logrus.WithFields(fields).Info("chan")
+		saveState(logger)
+		logger.Info().
+			Msg("chan")
 		fmt.Fprintf(&buf, "OK, from now on I will accept requests %s", msg)
 
 	case ".karma":
@@ -484,8 +594,9 @@ func onMessage(session *discordgo.Session, message *discordgo.MessageCreate) {
 			}
 
 			guild.KarmaEnabled = true
-			saveState()
-			logrus.WithFields(fields).Info("karma on")
+			saveState(logger)
+			logger.Info().
+				Msg("karma on")
 			fmt.Fprintf(&buf, "OK, karma tracking is now enabled")
 			return
 		}
@@ -497,8 +608,9 @@ func onMessage(session *discordgo.Session, message *discordgo.MessageCreate) {
 			}
 
 			guild.KarmaEnabled = false
-			saveState()
-			logrus.WithFields(fields).Info("karma off")
+			saveState(logger)
+			logger.Info().
+				Msg("karma off")
 			fmt.Fprintf(&buf, "OK, karma tracking is now disabled")
 			return
 		}
@@ -510,13 +622,14 @@ func onMessage(session *discordgo.Session, message *discordgo.MessageCreate) {
 			}
 
 			guild.Karma = nil
-			saveState()
-			logrus.WithFields(fields).Info("karma clear")
+			saveState(logger)
+			logger.Info().
+				Msg("karma clear")
 			fmt.Fprintf(&buf, "OK, all karma scores have been reset")
 			return
 		}
 
-		mm, valid := parseMember(&buf, fields, g, argument)
+		mm, valid := parseMember(&buf, logger, g, argument)
 		if !valid {
 			return
 		}
@@ -531,7 +644,7 @@ func onMessage(session *discordgo.Session, message *discordgo.MessageCreate) {
 			return
 		}
 
-		mm, valid := parseMember(&buf, fields, g, argument)
+		mm, valid := parseMember(&buf, logger, g, argument)
 		if !valid {
 			return
 		}
@@ -541,9 +654,10 @@ func onMessage(session *discordgo.Session, message *discordgo.MessageCreate) {
 		}
 		uu := mm.User
 		guild.Karma[uu.ID]++
-		saveState()
+		saveState(logger)
 		buf.Reset()
-		logrus.WithFields(fields).Info("karmabump")
+		logger.Info().
+			Msg("karmabump")
 		fmt.Fprintf(&buf, "%s has %d karma points", uu.Mention(), guild.Karma[uu.ID])
 
 	case ".personal":
@@ -554,8 +668,9 @@ func onMessage(session *discordgo.Session, message *discordgo.MessageCreate) {
 			}
 
 			guild.PersonalChannelsEnabled = true
-			saveState()
-			logrus.WithFields(fields).Info("personal on")
+			saveState(logger)
+			logger.Info().
+				Msg("personal on")
 			fmt.Fprintf(&buf, "OK, personal channels are now enabled")
 			return
 		}
@@ -567,8 +682,9 @@ func onMessage(session *discordgo.Session, message *discordgo.MessageCreate) {
 			}
 
 			guild.PersonalChannelsEnabled = false
-			saveState()
-			logrus.WithFields(fields).Info("personal off")
+			saveState(logger)
+			logger.Info().
+				Msg("personal off")
 			fmt.Fprintf(&buf, "OK, personal channels are now disabled")
 			return
 		}
@@ -579,21 +695,31 @@ func onMessage(session *discordgo.Session, message *discordgo.MessageCreate) {
 				return
 			}
 
-			fields["targetChannelName"] = nick
+			logger.UpdateContext(func(logctx zerolog.Context) zerolog.Context {
+				return logctx.Str("targetChannelName", nick)
+			})
+
 			cc, err := session.GuildChannelCreate(g.ID, nick, discordgo.ChannelTypeGuildText)
 			if err != nil {
-				logrus.WithError(err).WithFields(fields).Error("session.GuildChannelCreate")
+				logger.Error().
+					Err(err).
+					Msg("session.GuildChannelCreate")
 				buf.WriteString("Error creating channel!")
 				return
 			}
-			fields["targetChannelID"] = cc.ID
+
+			logger.UpdateContext(func(logctx zerolog.Context) zerolog.Context {
+				return logctx.Str("targetChannelID", cc.ID)
+			})
 
 			if len(guild.PersonalChannelsParentID) != 0 {
 				cc, err = session.ChannelEditComplex(cc.ID, &discordgo.ChannelEdit{
 					ParentID: guild.PersonalChannelsParentID,
 				})
 				if err != nil {
-					logrus.WithError(err).WithFields(fields).Error("session.ChannelEditComplex")
+					logger.Error().
+						Err(err).
+						Msg("session.ChannelEditComplex")
 					session.ChannelDelete(cc.ID)
 					buf.WriteString("Error creating channel!")
 					return
@@ -604,7 +730,8 @@ func onMessage(session *discordgo.Session, message *discordgo.MessageCreate) {
 				guild.PersonalChannels = make(map[string]string)
 			}
 			guild.PersonalChannels[u.ID] = cc.ID
-			logrus.WithFields(fields).Info("personal create")
+			logger.Info().
+				Msg("personal create")
 			fmt.Fprintf(&buf, "OK, I created your channel. %s", channelMention(cc))
 			return
 		}
@@ -623,21 +750,30 @@ func onMessage(session *discordgo.Session, message *discordgo.MessageCreate) {
 
 			cc, err := session.Channel(cid)
 			if err != nil {
-				logrus.WithError(err).WithFields(fields).Error("session.Channel")
+				logger.Error().
+					Err(err).
+					Msg("session.Channel")
 				buf.WriteString("Error finding your personal channel!")
 				return
 			}
 
-			fields["targetChannelID"] = cc.ID
-			fields["targetChannelName"] = cc.Name
+			logger.UpdateContext(func(logctx zerolog.Context) zerolog.Context {
+				return logctx.
+					Str("targetChannelID", cc.ID).
+					Str("targetChannelName", cc.Name)
+			})
+
 			_, err = gHelper.ChannelDelete(cc.ID)
 			if err != nil {
-				logrus.WithError(err).WithFields(fields).Error("helper.ChannelDelete")
+				logger.Error().
+					Err(err).
+					Msg("helper.ChannelDelete")
 				buf.WriteString("Error deleting channel!")
 				return
 			}
 
-			logrus.WithFields(fields).Info("personal destroy")
+			logger.Info().
+				Msg("personal destroy")
 			buf.WriteString("OK, I destroyed your personal channel.")
 			return
 		}
@@ -653,8 +789,9 @@ func onMessage(session *discordgo.Session, message *discordgo.MessageCreate) {
 
 		if argument == "none" {
 			guild.PersonalChannelsParentID = ""
-			saveState()
-			logrus.WithFields(fields).Info("parent")
+			saveState(logger)
+			logger.Info().
+				Msg("parent")
 			buf.WriteString("OK, from now on any any personal channels I create will have no parent category.")
 			return
 		}
@@ -669,22 +806,30 @@ func onMessage(session *discordgo.Session, message *discordgo.MessageCreate) {
 			return
 		}
 		if err != nil {
-			logrus.WithError(err).WithFields(fields).Error("helper.CategoryByArgument")
+			logger.Error().
+				Err(err).
+				Msg("helper.CategoryByArgument")
 			buf.WriteString("Error while searching for category!")
 			return
 		}
-		fields["targetCategoryID"] = cc.ID
-		fields["targetCategoryName"] = cc.Name
+
+		logger.UpdateContext(func(logctx zerolog.Context) zerolog.Context {
+			return logctx.
+				Str("targetCategoryID", cc.ID).
+				Str("targetCategoryName", cc.Name)
+		})
 
 		guild.PersonalChannelsParentID = cc.ID
-		saveState()
-		logrus.WithFields(fields).Info("parent")
+		saveState(logger)
+		logger.Info().
+			Msg("parent")
 		fmt.Fprintf(&buf, "OK, from now on any personal channels I create will be children of %s.", cc.Name)
 		return
 
 	case ".debug":
 		if trustedUser {
-			logrus.WithFields(fields).Info("debug")
+			logger.Info().
+				Msg("debug")
 		}
 		return
 
@@ -698,8 +843,10 @@ func channelMention(c *discordgo.Channel) string {
 	return fmt.Sprintf("<#%s>", c.ID)
 }
 
-func parseChan(buf *bytes.Buffer, fields logrus.Fields, c *discordgo.Channel, g *discordgo.Guild, arg string) (cid, msg string, valid bool) {
-	fields["target"] = arg
+func parseChan(buf *bytes.Buffer, logger *zerolog.Logger, c *discordgo.Channel, g *discordgo.Guild, arg string) (cid, msg string, valid bool) {
+	logger.UpdateContext(func(logctx zerolog.Context) zerolog.Context {
+		return logctx.Str("target", arg)
+	})
 
 	if arg == "" || arg == "any" {
 		cid = ""
@@ -709,8 +856,11 @@ func parseChan(buf *bytes.Buffer, fields logrus.Fields, c *discordgo.Channel, g 
 	}
 
 	if arg == "this" {
-		fields["targetChannelID"] = c.ID
-		fields["targetChannelName"] = c.Name
+		logger.UpdateContext(func(logctx zerolog.Context) zerolog.Context {
+			return logctx.
+				Str("targetChannelID", c.ID).
+				Str("targetChannelName", c.Name)
+		})
 		cid = c.ID
 		msg = "only on this channel"
 		valid = true
@@ -727,21 +877,29 @@ func parseChan(buf *bytes.Buffer, fields logrus.Fields, c *discordgo.Channel, g 
 		return
 	}
 	if err != nil {
-		logrus.WithError(err).WithFields(fields).Error("helper.ChannelByArgument")
+		logger.Error().
+			Err(err).
+			Msg("helper.ChannelByArgument")
 		buf.WriteString("Error while searching for channel!")
 		return
 	}
 
-	fields["targetChannelID"] = cc.ID
-	fields["targetChannelName"] = cc.Name
+	logger.UpdateContext(func(logctx zerolog.Context) zerolog.Context {
+		return logctx.
+			Str("targetChannelID", cc.ID).
+			Str("targetChannelName", cc.Name)
+	})
+
 	cid = cc.ID
 	msg = fmt.Sprintf("only on #%s", cc.Name)
 	valid = true
 	return
 }
 
-func parseRole(buf *bytes.Buffer, fields logrus.Fields, g *discordgo.Guild, arg string) (r *discordgo.Role, valid bool) {
-	fields["target"] = arg
+func parseRole(buf *bytes.Buffer, logger *zerolog.Logger, g *discordgo.Guild, arg string) (r *discordgo.Role, valid bool) {
+	logger.UpdateContext(func(logctx zerolog.Context) zerolog.Context {
+		return logctx.Str("target", arg)
+	})
 
 	var err error
 	r, err = gHelper.RoleByArgument(g.ID, arg)
@@ -754,19 +912,27 @@ func parseRole(buf *bytes.Buffer, fields logrus.Fields, g *discordgo.Guild, arg 
 		return
 	}
 	if err != nil {
-		logrus.WithError(err).WithFields(fields).Error("helper.RoleByArgument")
+		logger.Error().
+			Err(err).
+			Msg("helper.RoleByArgument")
 		buf.WriteString("Error while searching for role!")
 		return
 	}
 
-	fields["targetRoleID"] = r.ID
-	fields["targetRoleName"] = r.Name
+	logger.UpdateContext(func(logctx zerolog.Context) zerolog.Context {
+		return logctx.
+			Str("targetRoleID", r.ID).
+			Str("targetRoleName", r.Name)
+	})
+
 	valid = true
 	return
 }
 
-func parseMember(buf *bytes.Buffer, fields logrus.Fields, g *discordgo.Guild, arg string) (m *discordgo.Member, valid bool) {
-	fields["target"] = arg
+func parseMember(buf *bytes.Buffer, logger *zerolog.Logger, g *discordgo.Guild, arg string) (m *discordgo.Member, valid bool) {
+	logger.UpdateContext(func(logctx zerolog.Context) zerolog.Context {
+		return logctx.Str("target", arg)
+	})
 
 	var err error
 	m, err = gHelper.MemberByArgument(g.ID, arg)
@@ -779,7 +945,9 @@ func parseMember(buf *bytes.Buffer, fields logrus.Fields, g *discordgo.Guild, ar
 		return
 	}
 	if err != nil {
-		logrus.WithError(err).WithFields(fields).Error("helper.MemberByArgument")
+		logger.Error().
+			Err(err).
+			Msg("helper.MemberByArgument")
 		buf.WriteString("Error while searching for member!")
 		return
 	}
@@ -790,22 +958,30 @@ func parseMember(buf *bytes.Buffer, fields logrus.Fields, g *discordgo.Guild, ar
 		targetNick = u.Username
 	}
 
-	fields["targetUserID"] = u.ID
-	fields["targetUserName"] = u.Username + "#" + u.Discriminator
-	fields["targetUserNick"] = targetNick
+	logger.UpdateContext(func(logctx zerolog.Context) zerolog.Context {
+		return logctx.
+			Str("targetUserID", u.ID).
+			Str("targetUserName", u.Username+"#"+u.Discriminator).
+			Str("targetUserNick", targetNick)
+	})
+
 	valid = true
 	return
 }
 
-func saveState() {
+func saveState(logger *zerolog.Logger) {
 	raw, err := jsonMarshal(&gState)
 	if err != nil {
-		logrus.WithError(err).Fatal("json.Marshal")
+		logger.Fatal().
+			Err(err).
+			Msg("json.Marshal")
 	}
 
-	err = ioutil.WriteFile(*flagStateFile, raw, 0666)
+	err = ioutil.WriteFile(flagStateFile, raw, 0666)
 	if err != nil {
-		logrus.WithError(err).Fatal("ioutil.WriteFile")
+		logger.Fatal().
+			Err(err).
+			Msg("ioutil.WriteFile")
 	}
 }
 
@@ -814,7 +990,7 @@ func isAuto(guild *botGuildState, r *discordgo.Role) bool {
 	return found
 }
 
-func isTrusted(guild *botGuildState, g *discordgo.Guild, u *discordgo.User) bool {
+func isTrusted(logger *zerolog.Logger, guild *botGuildState, g *discordgo.Guild, u *discordgo.User) bool {
 	if u.ID == g.OwnerID {
 		return true
 	}
@@ -824,7 +1000,9 @@ func isTrusted(guild *botGuildState, g *discordgo.Guild, u *discordgo.User) bool
 	if len(guild.TrustedRoles) != 0 {
 		member, err := gHelper.GuildMember(g.ID, u.ID)
 		if err != nil {
-			logrus.WithError(err).Error("helper.GuildMember")
+			logger.Error().
+				Err(err).
+				Msg("helper.GuildMember")
 			return false
 		}
 		for _, roleID := range member.Roles {
@@ -845,6 +1023,136 @@ func jsonMarshal(v interface{}) ([]byte, error) {
 		return nil, err
 	}
 	return buf.Bytes(), nil
+}
+
+// type logWriter {{{
+
+type logWriter struct {
+	fileName   string
+	mu         sync.Mutex
+	cv         *sync.Cond
+	file       *os.File
+	numWriters int
+}
+
+func newLogWriter(fileName string) (*logWriter, error) {
+	file, err := os.OpenFile(fileName, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0666)
+	if err != nil {
+		return nil, err
+	}
+
+	w := &logWriter{
+		fileName:   fileName,
+		file:       file,
+		numWriters: 0,
+	}
+	w.cv = sync.NewCond(&w.mu)
+	return w, nil
+}
+
+func (w *logWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	file := w.file
+	w.numWriters++
+	w.mu.Unlock()
+
+	defer func() {
+		w.mu.Lock()
+		w.numWriters--
+		if w.numWriters <= 0 {
+			w.cv.Signal()
+		}
+		w.mu.Unlock()
+	}()
+
+	return file.Write(p)
+}
+
+func (w *logWriter) Close() error {
+	w.mu.Lock()
+	defer func() {
+		w.cv.Signal()
+		w.mu.Unlock()
+	}()
+
+	for w.numWriters > 0 {
+		w.cv.Wait()
+	}
+
+	var errs []error
+	if err := w.file.Sync(); err != nil {
+		errs = append(errs, err)
+	}
+	if err := w.file.Close(); err != nil {
+		errs = append(errs, err)
+	}
+	return errorOrNil(errs)
+}
+
+func (w *logWriter) Rotate() error {
+	newFile, err := os.OpenFile(w.fileName, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0666)
+	if err != nil {
+		return err
+	}
+
+	w.mu.Lock()
+	defer func() {
+		w.cv.Signal()
+		w.mu.Unlock()
+	}()
+
+	for w.numWriters > 0 {
+		w.cv.Wait()
+	}
+
+	oldFile := w.file
+	w.file = newFile
+
+	var errs []error
+	if e := oldFile.Sync(); e != nil {
+		errs = append(errs, e)
+	}
+	if e := oldFile.Close(); e != nil {
+		errs = append(errs, e)
+	}
+	return errorOrNil(errs)
+}
+
+var _ io.WriteCloser = (*logWriter)(nil)
+
+// }}}
+
+func errorOrNil(errs []error) error {
+	length := uint(len(errs))
+
+	if length == 0 {
+		return nil
+	}
+
+	if length == 1 {
+		_, ok := errs[0].(*multierror.Error)
+		if !ok {
+			return errs[0]
+		}
+	}
+
+	clone := &multierror.Error{
+		Errors:      errs,
+		ErrorFormat: nil,
+	}
+	flattenErrors(clone, errs)
+	return clone
+}
+
+func flattenErrors(out *multierror.Error, errs []error) {
+	for _, e := range errs {
+		switch x := e.(type) {
+		case *multierror.Error:
+			flattenErrors(out, x.Errors)
+		default:
+			out.Errors = append(out.Errors, e)
+		}
+	}
 }
 
 const msgBasicCoreHelp = `
